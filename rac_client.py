@@ -559,7 +559,7 @@ async def read_packet(reader):
                         cluster = await read_cluster(packet)
                         packet_array.append(cluster)
                     elif ras_data_type == MessageType.GET_INFOBASES_SHORT_RESPONSE:
-                        infobase = read_infobase_short(packet)
+                        infobase = await read_infobase_short(packet)
                         packet_array.append(infobase)
                     elif ras_data_type in [MessageType.GET_INFOBASE_SESSIONS_RESPONSE,
                                            MessageType.GET_SESSIONS_RESPONSE]:
