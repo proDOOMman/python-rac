@@ -552,6 +552,8 @@ async def read_packet(reader):
             elif ras_data_type == MessageType.GET_INFOBASE_INFO_RESPONSE:
                 infobase = await read_infobase(packet)
                 packet_array.append(infobase)
+            elif ras_data_type == MessageType.CREATE_INFOBASE_RESPONSE:
+                packet_array.append(read_uuid(packet))
             else:
                 ras_data_count = await unpack_varint_base128(packet)
                 for ras_data_number in range(ras_data_count):
@@ -665,6 +667,41 @@ async def ras_command(ras_args):
             send_packet(writer, packet)
             packet_type, packet_array = await read_packet(reader)
             assert packet_type == PacketType.ENDPOINT_MESSAGE
+
+        if ras_args.subcommand1 == 'create':
+            packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.CREATE_INFOBASE_REQUEST)
+            packet.append_raw(cluster_id)
+            infobase = {}
+            infobase['infobase'] = uuid.UUID(int=0)
+            infobase['date_offset'] = ras_args.date_offset
+            infobase['dbms'] = ras_args.dbms
+            infobase['db_name'] = ras_args.db_name
+            infobase['db_password'] = ras_args.db_pwd.encode()
+            infobase['db_server_name'] = ras_args.db_server
+            infobase['db_user'] = ras_args.db_user
+            infobase['denied_from'] = None
+            infobase['denied_message'] = ''
+            infobase['denied_parameter'] = ''
+            infobase['denied_to'] = None
+            infobase['descr'] = ras_args.descr
+            infobase['locale'] = ras_args.locale
+            infobase['name'] = ras_args.name
+            infobase['permission_code'] = ''
+            infobase['scheduled_jobs_denied'] = ras_args.scheduled_jobs_deny == 'on'
+            infobase['security_level'] = ras_args.security_level
+            infobase['sessions_denied'] = False
+            infobase['license_distribution'] = int(ras_args.license_distribution == 'allow')
+            infobase['external_connection_string'] = ""
+            infobase['external_session_manager_required'] = False
+            infobase['securirty_profile'] = ""
+            infobase['safe_mode_securirty_profile'] = ""
+            infobase['reserve_working_processes'] = False
+            write_infobase(infobase, packet)
+            packet.append_raw(write_int32(int(ras_args.create_database)))
+            send_packet(writer, packet)
+            packet_type, packet_array = await read_packet(reader)
+            assert packet_type == PacketType.ENDPOINT_MESSAGE
+            pp(packet_array)
 
         if ras_args.subcommand1 == 'info' or ras_args.subcommand1 == 'update':
             packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.GET_INFOBASE_INFO_REQUEST)
@@ -847,6 +884,46 @@ if __name__ == '__main__':
                                         help="""управление блокировкой выполнения регламентных заданий:
                 on - выполнение регламентных заданий запрещено
                 off - выполнение регламентных заданий разрешено""",
+                                        required=False)
+
+    parser_infobase_create = infobase_sub_parsers.add_parser('create',
+                                                             help='создание новой информационной базы')
+    parser_infobase_create.add_argument('--create-database', action='store_true',
+                                     help='при создании информационной базы создать базу данных')
+    parser_infobase_create.add_argument('--name',
+                                        help='имя информационной базы', required=True)
+    parser_infobase_create.add_argument('--dbms',
+                                        help="""тип СУБД, в которой размещается информационная база
+                    MSSQLServer - MS SQL Server
+                    PostgreSQL - PostgreSQL
+                    IBMDB2 - IBM DB2
+                    OracleDatabase - Oracle Database""",
+                                        choices=['MSSQLServer', 'PostgreSQL', 'IBMDB2', 'OracleDatabase'], required=True)
+    parser_infobase_create.add_argument('--db-server',
+                                        help='имя сервера баз данных', required=True)
+    parser_infobase_create.add_argument('--db-name',
+                                        help='имя базы данных', required=True)
+    parser_infobase_create.add_argument('--locale',
+                                        help='идентификатор национальных настроек информационной базы', required=True)
+    parser_infobase_create.add_argument('--db-user',
+                                        help='имя администратора базы данных', required=True)
+    parser_infobase_create.add_argument('--db-pwd',
+                                        help='пароль администратора базы данных', required=True)
+    parser_infobase_create.add_argument('--descr', default='',
+                                        help='описание информационной базы', required=False)
+    parser_infobase_create.add_argument('--date-offset', choices=[0, 2000], default=0, type=int,
+                                        help='смещение дат в информационной базе', required=False)
+    parser_infobase_create.add_argument('--security-level', default=0, type=int,
+                                        help='уровень безопасности установки соединений с информационной базой', required=False)
+    parser_infobase_create.add_argument('--scheduled-jobs-deny', choices=['on', 'off'],
+                                        help="""управление блокировкой выполнения регламентных заданий:
+                    on - выполнение регламентных заданий запрещено
+                    off - выполнение регламентных заданий разрешено""",
+                                        required=False)
+    parser_infobase_create.add_argument('--license-distribution', choices=['deny', 'allow'],
+                                        help="""управление выдачей лицензий сервером 1С:Предприятия:
+                    deny - выдача лицензий запрещена
+                    allow - выдача лицензий разрешена""",
                                         required=False)
 
     parser_session = sub_parsers.add_parser('session', help='Режим администрирования сеансов информационных баз')
