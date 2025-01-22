@@ -703,6 +703,20 @@ async def ras_command(ras_args):
             assert packet_type == PacketType.ENDPOINT_MESSAGE
             pp(packet_array)
 
+        if ras_args.subcommand1 == 'drop':
+            packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.DROP_INFOBASE_REQUEST)
+            packet.append_raw(cluster_id)
+            packet.append_raw(uuid.UUID(ras_args.infobase).bytes)
+            mode = 0
+            if ras_args.drop_database:
+                mode = 1
+            elif ras_args.clear_database:
+                mode = 2
+            packet.append_raw(write_int32(mode))
+            send_packet(writer, packet)
+            packet_type, packet_array = await read_packet(reader)
+            assert packet_type == PacketType.ENDPOINT_MESSAGE
+
         if ras_args.subcommand1 == 'info' or ras_args.subcommand1 == 'update':
             packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.GET_INFOBASE_INFO_REQUEST)
             packet.append_raw(cluster_id)
@@ -885,7 +899,6 @@ if __name__ == '__main__':
                 on - выполнение регламентных заданий запрещено
                 off - выполнение регламентных заданий разрешено""",
                                         required=False)
-
     parser_infobase_create = infobase_sub_parsers.add_parser('create',
                                                              help='создание новой информационной базы')
     parser_infobase_create.add_argument('--create-database', action='store_true',
@@ -925,7 +938,18 @@ if __name__ == '__main__':
                     deny - выдача лицензий запрещена
                     allow - выдача лицензий разрешена""",
                                         required=False)
-
+    parser_infobase_drop = infobase_sub_parsers.add_parser('drop',
+                                                             help='режим удаления информационной базы')
+    parser_infobase_drop.add_argument('--infobase',
+                                        help='идентификатор информационной базы', required=True)
+    parser_infobase_drop.add_argument('--infobase-user',
+                                        help='имя администратора информационной базы', required=False)
+    parser_infobase_drop.add_argument('--infobase-pwd',
+                                        help='пароль администратора информационной базы', required=False)
+    parser_infobase_drop.add_argument('--drop-database', action='store_true',
+                                        help='при удалении информационной базы удалить базу данных')
+    parser_infobase_drop.add_argument('--clear-database', action='store_true',
+                                        help='при удалении информационной базы очистить базу данных')
     parser_session = sub_parsers.add_parser('session', help='Режим администрирования сеансов информационных баз')
     parser_session.add_argument('--cluster',
                                 help='идентификатор кластера серверов', required=True)
