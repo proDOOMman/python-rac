@@ -50,3 +50,4 @@
 
 ``rac_client.py --ras-host=localhost --ras-port=1545 session --cluster=0cec4877-38b8-4fa1-8ee3-3c6623ba7c92 --cluster-user=clusteradmin --cluster-pwd=clusterpassword terminate``
 
+Также доступно: создание/удаление информационных баз, управление администраторами агента и кластера, создание/удаление рабочих серверов
