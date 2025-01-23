@@ -307,7 +307,7 @@ def age_delta():
 def date_from_int64(value):
     if not value:
         return None
-    return datetime.datetime.fromtimestamp((value - age_delta())/10000, datetime.timezone.utc)
+    return datetime.datetime.fromtimestamp((value - age_delta()) / 10000, datetime.timezone.utc)
 
 
 def date_to_int64(value):
@@ -518,6 +518,26 @@ async def read_session(packet):
     return session
 
 
+async def read_user(packet):
+    user = {}
+    user['name'] = await read_string(packet)
+    user['descr'] = await read_string(packet)
+    user['password'] = await read_bytes(packet)
+    user['password_auth_allowed'] = read_bool(packet)
+    user['sys_auth_allowed'] = read_bool(packet)
+    user['sys_user_name'] = await read_string(packet)
+    return user
+
+
+def write_user(user, packet):
+    packet.append(user['name'].encode())
+    packet.append(user['descr'].encode())
+    packet.append(user['password'].encode())
+    packet.append_raw(write_bool(user['password_auth_allowed']))
+    packet.append_raw(write_bool(user['sys_auth_allowed']))
+    packet.append(user['sys_user_name'].encode())
+
+
 async def read_packet(reader):
     packet_type = PacketType(await reader.read(1))
     packet_size = await unpack_varint_base128(reader)
@@ -567,6 +587,10 @@ async def read_packet(reader):
                                            MessageType.GET_SESSIONS_RESPONSE]:
                         session = await read_session(packet)
                         packet_array.append(session)
+                    elif ras_data_type in [MessageType.GET_CLUSTER_ADMINS_RESPONSE,
+                                           MessageType.GET_AGENT_ADMINS_RESPONSE]:
+                        user = await read_user(packet)
+                        packet_array.append(user)
 
     return packet_type, packet_array
 
@@ -601,6 +625,53 @@ async def ras_command(ras_args):
     assert packet_array[1] == b'10.0'
     endpoint_id = packet_array[2]
 
+    if (hasattr(ras_args, 'agent_user') and hasattr(ras_args, 'agent_pwd')
+            and ras_args.agent_user is not None and ras_args.agent_pwd is not None):
+        packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.AUTHENTICATE_AGENT_REQUEST)
+        packet.append(ras_args.agent_user.encode())
+        packet.append(ras_args.agent_pwd.encode())
+        send_packet(writer, packet)
+        packet_type, packet_array = await read_packet(reader)
+        assert packet_type == PacketType.ENDPOINT_MESSAGE
+
+    if (hasattr(ras_args, 'cluster_user') and hasattr(ras_args, 'cluster_pwd')
+            and ras_args.cluster_user is not None and ras_args.cluster_pwd is not None):
+        packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.AUTHENTICATE_REQUEST)
+        packet.append_raw(uuid.UUID(ras_args.cluster).bytes)
+        packet.append(ras_args.cluster_user.encode())
+        packet.append(ras_args.cluster_pwd.encode())
+        send_packet(writer, packet)
+        packet_type, packet_array = await read_packet(reader)
+        assert packet_type == PacketType.ENDPOINT_MESSAGE
+
+    if ras_args.command == 'agent':
+        if ras_args.subcommand1 == 'admin':
+            if ras_args.subcommand2 == 'list':
+                packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.GET_AGENT_ADMINS_REQUEST)
+                send_packet(writer, packet)
+                packet_type, packet_array = await read_packet(reader)
+                assert packet_type == PacketType.ENDPOINT_MESSAGE
+                pp(packet_array)
+            elif ras_args.subcommand2 == 'register':
+                packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.REG_AGENT_ADMIN_REQUEST)
+                user = {}
+                user['name'] = ras_args.name
+                user['descr'] = ras_args.descr
+                user['password'] = ras_args.pwd
+                user['password_auth_allowed'] = "pwd" in ras_args.auth
+                user['sys_auth_allowed'] = "os" in ras_args.auth
+                user['sys_user_name'] = ras_args.os_user
+                write_user(user, packet)
+                send_packet(writer, packet)
+                packet_type, packet_array = await read_packet(reader)
+                assert packet_type == PacketType.ENDPOINT_MESSAGE
+            elif ras_args.subcommand2 == 'remove':
+                packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.UNREG_AGENT_ADMIN_REQUEST)
+                packet.append(ras_args.name.encode())
+                send_packet(writer, packet)
+                packet_type, packet_array = await read_packet(reader)
+                assert packet_type == PacketType.ENDPOINT_MESSAGE
+
     if ras_args.command == 'cluster':
         if ras_args.subcommand1 == 'list':
             packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.GET_CLUSTERS_REQUEST)
@@ -625,29 +696,41 @@ async def ras_command(ras_args):
                     cluster['expiration-timeout'] = ras_args.expiration_timeout
                 if ras_args.name is not None:
                     cluster['name'] = ras_args.name
-                if ras_args.agent_user is not None and ras_args.agent_pwd is not None:
-                    packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.AUTHENTICATE_AGENT_REQUEST)
-                    packet.append(ras_args.agent_user.encode())
-                    packet.append(ras_args.agent_pwd.encode())
-                    send_packet(writer, packet)
-                    packet_type, packet_array = await read_packet(reader)
-                    assert packet_type == PacketType.ENDPOINT_MESSAGE
                 packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.REG_CLUSTER_REQUEST)
                 write_cluster(cluster, packet)
                 send_packet(writer, packet)
                 packet_type, packet_array = await read_packet(reader)
                 assert packet_type == PacketType.ENDPOINT_MESSAGE
-
-
-    if hasattr(ras_args, 'cluster_user') and hasattr(ras_args,
-                                                     'cluster_pwd') and ras_args.cluster_user is not None and ras_args.cluster_pwd is not None:
-        packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.AUTHENTICATE_REQUEST)
-        packet.append_raw(uuid.UUID(ras_args.cluster).bytes)
-        packet.append(ras_args.cluster_user.encode())
-        packet.append(ras_args.cluster_pwd.encode())
-        send_packet(writer, packet)
-        packet_type, packet_array = await read_packet(reader)
-        assert packet_type == PacketType.ENDPOINT_MESSAGE
+        elif ras_args.subcommand1 == 'admin':
+            if ras_args.subcommand2 == 'list':
+                cluster_id = uuid.UUID(ras_args.cluster).bytes
+                packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.GET_CLUSTER_ADMINS_REQUEST)
+                packet.append_raw(cluster_id)
+                send_packet(writer, packet)
+                packet_type, packet_array = await read_packet(reader)
+                assert packet_type == PacketType.ENDPOINT_MESSAGE
+                pp(packet_array)
+            elif ras_args.subcommand2 == 'register':
+                packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.REG_CLUSTER_ADMIN_REQUEST)
+                packet.append_raw(uuid.UUID(ras_args.cluster).bytes)
+                user = {}
+                user['name'] = ras_args.name
+                user['descr'] = ras_args.descr
+                user['password'] = ras_args.pwd
+                user['password_auth_allowed'] = "pwd" in ras_args.auth
+                user['sys_auth_allowed'] = "os" in ras_args.auth
+                user['sys_user_name'] = ras_args.os_user
+                write_user(user, packet)
+                send_packet(writer, packet)
+                packet_type, packet_array = await read_packet(reader)
+                assert packet_type == PacketType.ENDPOINT_MESSAGE
+            elif ras_args.subcommand2 == 'remove':
+                packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.UNREG_CLUSTER_ADMIN_REQUEST)
+                packet.append_raw(uuid.UUID(ras_args.cluster).bytes)
+                packet.append(ras_args.name.encode())
+                send_packet(writer, packet)
+                packet_type, packet_array = await read_packet(reader)
+                assert packet_type == PacketType.ENDPOINT_MESSAGE
 
     if ras_args.command == 'infobase':
         cluster_id = uuid.UUID(ras_args.cluster).bytes
@@ -659,7 +742,8 @@ async def ras_command(ras_args):
             assert packet_type == PacketType.ENDPOINT_MESSAGE
             pp(packet_array)
 
-        if hasattr(ras_args, 'infobase_user') and hasattr(ras_args, 'infobase_pwd') and ras_args.infobase_user is not None and ras_args.infobase_pwd is not None:
+        if hasattr(ras_args, 'infobase_user') and hasattr(ras_args,
+                                                          'infobase_pwd') and ras_args.infobase_user is not None and ras_args.infobase_pwd is not None:
             packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.ADD_AUTHENTICATION_REQUEST)
             packet.append_raw(cluster_id)
             packet.append(ras_args.infobase_user.encode())
@@ -818,6 +902,39 @@ if __name__ == '__main__':
 
     sub_parsers = parser.add_subparsers(help='Группы команд', dest='command', required=True)
 
+    parser_agent = sub_parsers.add_parser('agent', help='Режим администрирования агента кластера серверов')
+    parser_agent.add_argument('--agent-user',
+                              help='имя администратора агента кластера', required=False)
+    parser_agent.add_argument('--agent-pwd',
+                              help='пароль администратора агента кластера', required=False)
+    agent_sub_parsers = parser_agent.add_subparsers(help='Команды администрирования агента кластера серверов',
+                                                    required=True, dest='subcommand1')
+    agent_admin = agent_sub_parsers.add_parser('admin',
+                                               help='управление администраторами кластера')
+    agent_admin_sub_parsers = agent_admin.add_subparsers(help='Дополнительные команды', required=True,
+                                                         dest='subcommand2')
+    parser_agent_admin_list = agent_admin_sub_parsers.add_parser('list',
+                                                                 help='получение списка администраторов агента кластера')
+    parser_agent_admin_register = agent_admin_sub_parsers.add_parser('register',
+                                                                     help='добавление нового администратора агента кластера')
+    parser_agent_admin_register.add_argument('--name',
+                                             help='имя администратора', required=True)
+    parser_agent_admin_register.add_argument('--pwd', default="",
+                                             help='пароль администратора, в случае аутентификации паролем',
+                                             required=False)
+    parser_agent_admin_register.add_argument('--descr', default="",
+                                             help='описание администратора', required=False)
+    parser_agent_admin_register.add_argument('--auth', choices=['pwd', 'os'], nargs="+", default=[],
+                                             help="""доступные способы аутентификации:
+                    pwd - при помощи имени пользователя и пароля
+                    os - аутентификация средствами ОС""", required=False)
+    parser_agent_admin_register.add_argument('--os-user', default="",
+                                             help='имя пользователя операционной системы', required=False)
+    parser_cluster_admin_remove = agent_admin_sub_parsers.add_parser('remove',
+                                                                     help='удаление администратора агента кластера')
+    parser_cluster_admin_remove.add_argument('--name',
+                                             help='имя администратора', required=True)
+
     parser_cluster = sub_parsers.add_parser('cluster', help='Режим администрирования кластера серверов')
     cluster_sub_parsers = parser_cluster.add_subparsers(help='Команды администрирования кластера серверов',
                                                         required=True, dest='subcommand1')
@@ -827,18 +944,51 @@ if __name__ == '__main__':
                                      help='идентификатор кластера серверов', required=True)
     parser_cluster_update = cluster_sub_parsers.add_parser('update', help='обновление параметров кластера')
     parser_cluster_update.add_argument('--cluster',
-                                     help='идентификатор кластера серверов', required=True)
-    parser_cluster_update.add_argument('--agent-user',
-                                 help='имя администратора агента кластера', required=False)
-    parser_cluster_update.add_argument('--agent-pwd',
-                                 help='пароль администратора агента кластера', required=False)
+                                       help='идентификатор кластера серверов', required=True)
     parser_cluster_update.add_argument('--lifetime-limit', type=int,
-                                       help='период перезапуска рабочих процессов кластера (в секундах)', required=False)
+                                       help='период перезапуска рабочих процессов кластера (в секундах)',
+                                       required=False)
     parser_cluster_update.add_argument('--expiration-timeout', type=int,
                                        help='период принудительного завершения (в секундах)', required=False)
     parser_cluster_update.add_argument('--name',
                                        help='имя (представление) кластера',
                                        required=False)
+
+    parser_cluster_admin = cluster_sub_parsers.add_parser('admin',
+                                                          help='управление администраторами кластера')
+    parser_cluster_admin.add_argument('--cluster',
+                                      help='идентификатор кластера серверов', required=True)
+    parser_cluster_admin.add_argument('--cluster-user',
+                                      help='имя администратора кластера', required=False)
+    parser_cluster_admin.add_argument('--cluster-pwd',
+                                      help='пароль администратора кластера', required=False)
+    cluster_admin_sub_parsers = parser_cluster_admin.add_subparsers(help='Дополнительные команды', required=True,
+                                                                    dest='subcommand2')
+    parser_cluster_admin_list = cluster_admin_sub_parsers.add_parser('list',
+                                                                     help='получение списка администраторов кластера')
+    parser_cluster_admin_register = cluster_admin_sub_parsers.add_parser('register',
+                                                                         help='добавление нового администратора кластера')
+    parser_cluster_admin_register.add_argument('--name',
+                                               help='имя администратора', required=True)
+    parser_cluster_admin_register.add_argument('--pwd', default="",
+                                               help='пароль администратора, в случае аутентификации паролем',
+                                               required=False)
+    parser_cluster_admin_register.add_argument('--descr', default="",
+                                               help='описание администратора', required=False)
+    parser_cluster_admin_register.add_argument('--auth', choices=['pwd', 'os'], nargs="+", default=[],
+                                               help="""доступные способы аутентификации:
+                pwd - при помощи имени пользователя и пароля
+                os - аутентификация средствами ОС""", required=False)
+    parser_cluster_admin_register.add_argument('--os-user', default="",
+                                               help='имя пользователя операционной системы', required=False)
+    parser_cluster_admin_register.add_argument('--agent-user',
+                                               help='имя администратора агента кластера', required=False)
+    parser_cluster_admin_register.add_argument('--agent-pwd',
+                                               help='пароль администратора агента кластера', required=False)
+    parser_cluster_admin_remove = cluster_admin_sub_parsers.add_parser('remove',
+                                                                       help='удаление администратора кластера')
+    parser_cluster_admin_remove.add_argument('--name',
+                                             help='имя администратора', required=True)
 
     parser_infobase = sub_parsers.add_parser('infobase', help='Режим администрирования информационных баз')
     parser_infobase.add_argument('--cluster',
@@ -874,11 +1024,13 @@ if __name__ == '__main__':
                                         help='описание информационной базы', required=False)
     parser_infobase_update.add_argument('--denied-from',
                                         help='начало интервала времени, в течение которого действует режим блокировки сеансов, YYYY-MM-DD HH:mm:ss',
-                                        type=lambda s: datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc) if len(s) > 0 else 0,
+                                        type=lambda s: datetime.datetime.fromisoformat(s).replace(
+                                            tzinfo=datetime.timezone.utc) if len(s) > 0 else 0,
                                         required=False)
     parser_infobase_update.add_argument('--denied-to',
                                         help='конец интервала времени, в течение которого действует режим блокировки сеансов, YYYY-MM-DD HH:mm:ss',
-                                        type=lambda s: datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc) if len(s) > 0 else 0,
+                                        type=lambda s: datetime.datetime.fromisoformat(s).replace(
+                                            tzinfo=datetime.timezone.utc) if len(s) > 0 else 0,
                                         required=False)
     parser_infobase_update.add_argument('--denied-message',
                                         help='сообщение, выдаваемое при попытке нарушения блокировки сеансов',
@@ -902,7 +1054,7 @@ if __name__ == '__main__':
     parser_infobase_create = infobase_sub_parsers.add_parser('create',
                                                              help='создание новой информационной базы')
     parser_infobase_create.add_argument('--create-database', action='store_true',
-                                     help='при создании информационной базы создать базу данных')
+                                        help='при создании информационной базы создать базу данных')
     parser_infobase_create.add_argument('--name',
                                         help='имя информационной базы', required=True)
     parser_infobase_create.add_argument('--dbms',
@@ -911,7 +1063,8 @@ if __name__ == '__main__':
                     PostgreSQL - PostgreSQL
                     IBMDB2 - IBM DB2
                     OracleDatabase - Oracle Database""",
-                                        choices=['MSSQLServer', 'PostgreSQL', 'IBMDB2', 'OracleDatabase'], required=True)
+                                        choices=['MSSQLServer', 'PostgreSQL', 'IBMDB2', 'OracleDatabase'],
+                                        required=True)
     parser_infobase_create.add_argument('--db-server',
                                         help='имя сервера баз данных', required=True)
     parser_infobase_create.add_argument('--db-name',
@@ -927,7 +1080,8 @@ if __name__ == '__main__':
     parser_infobase_create.add_argument('--date-offset', choices=[0, 2000], default=0, type=int,
                                         help='смещение дат в информационной базе', required=False)
     parser_infobase_create.add_argument('--security-level', default=0, type=int,
-                                        help='уровень безопасности установки соединений с информационной базой', required=False)
+                                        help='уровень безопасности установки соединений с информационной базой',
+                                        required=False)
     parser_infobase_create.add_argument('--scheduled-jobs-deny', choices=['on', 'off'],
                                         help="""управление блокировкой выполнения регламентных заданий:
                     on - выполнение регламентных заданий запрещено
@@ -939,17 +1093,17 @@ if __name__ == '__main__':
                     allow - выдача лицензий разрешена""",
                                         required=False)
     parser_infobase_drop = infobase_sub_parsers.add_parser('drop',
-                                                             help='режим удаления информационной базы')
+                                                           help='режим удаления информационной базы')
     parser_infobase_drop.add_argument('--infobase',
-                                        help='идентификатор информационной базы', required=True)
+                                      help='идентификатор информационной базы', required=True)
     parser_infobase_drop.add_argument('--infobase-user',
-                                        help='имя администратора информационной базы', required=False)
+                                      help='имя администратора информационной базы', required=False)
     parser_infobase_drop.add_argument('--infobase-pwd',
-                                        help='пароль администратора информационной базы', required=False)
+                                      help='пароль администратора информационной базы', required=False)
     parser_infobase_drop.add_argument('--drop-database', action='store_true',
-                                        help='при удалении информационной базы удалить базу данных')
+                                      help='при удалении информационной базы удалить базу данных')
     parser_infobase_drop.add_argument('--clear-database', action='store_true',
-                                        help='при удалении информационной базы очистить базу данных')
+                                      help='при удалении информационной базы очистить базу данных')
     parser_session = sub_parsers.add_parser('session', help='Режим администрирования сеансов информационных баз')
     parser_session.add_argument('--cluster',
                                 help='идентификатор кластера серверов', required=True)
