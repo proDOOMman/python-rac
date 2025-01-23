@@ -538,6 +538,65 @@ def write_user(user, packet):
     packet.append(user['sys_user_name'].encode())
 
 
+async def read_server(packet):
+    server = {}
+    server['working_server_id'] = read_uuid(packet)
+    server['host_name'] = await read_string(packet)
+    server['main_port'] = read_uint16(packet)
+    server['name'] = await read_string(packet)
+    server['main_server'] = read_bool(packet)
+    server['safe_working_processes_memory_limit'] = read_int64(packet)
+    server['safe_call_memory_limit'] = read_int64(packet)
+    server['infobases_per_working_process_limit'] = read_int32(packet)
+    server['working_process_memory_limit'] = read_int64(packet)
+    server['connections_per_working_process_limit'] = read_int32(packet)
+    server['cluster_main_port'] = read_uint16(packet)
+    server['dedicated_managers'] = read_bool(packet)
+    server['port_ranges'] = await read_port_ranges(packet)
+    # version >= 8
+    server['critical_processes_total_memory'] = read_int64(packet)
+    server['temporary_allowed_processes_total_memory'] = read_int64(packet)
+    server['temporary_allowed_processes_total_memory_time_limit'] = read_int64(packet)
+    return server
+
+
+async def read_port_ranges(packet):
+    ranges_array = []
+    ras_data_count = await unpack_varint_base128(packet)
+    for ras_data_number in range(ras_data_count):
+        port_max = read_uint16(packet)
+        port_min = read_uint16(packet)
+        ranges_array.append((port_min, port_max))
+    return ranges_array
+
+
+def write_server(server, packet):
+    packet.append_raw(server['working_server_id'].bytes)
+    packet.append(server['host_name'].encode())
+    packet.append_raw(write_uint16(server['main_port']))
+    packet.append(server['name'].encode())
+    packet.append_raw(write_bool(server['main_server']))
+    packet.append_raw(write_int64(server['safe_working_processes_memory_limit']))
+    packet.append_raw(write_int64(server['safe_call_memory_limit']))
+    packet.append_raw(write_int32(server['infobases_per_working_process_limit']))
+    packet.append_raw(write_int64(server['working_process_memory_limit']))
+    packet.append_raw(write_int32(server['connections_per_working_process_limit']))
+    packet.append_raw(write_uint16(server['cluster_main_port']))
+    packet.append_raw(write_bool(server['dedicated_managers']))
+    write_port_ranges(server['port_ranges'], packet)
+    # version >= 8
+    packet.append_raw(write_int64(server['critical_processes_total_memory']))
+    packet.append_raw(write_int64(server['temporary_allowed_processes_total_memory']))
+    packet.append_raw(write_int64(server['temporary_allowed_processes_total_memory_time_limit']))
+
+
+def write_port_ranges(ranges_array, packet):
+    packet.append_raw(pack_varint_base128(len(ranges_array)))
+    for port_range in ranges_array:
+        packet.append_raw(write_uint16(port_range[1]))
+        packet.append_raw(write_uint16(port_range[0]))
+
+
 async def read_packet(reader):
     packet_type = PacketType(await reader.read(1))
     packet_size = await unpack_varint_base128(reader)
@@ -572,7 +631,10 @@ async def read_packet(reader):
             elif ras_data_type == MessageType.GET_INFOBASE_INFO_RESPONSE:
                 infobase = await read_infobase(packet)
                 packet_array.append(infobase)
-            elif ras_data_type == MessageType.CREATE_INFOBASE_RESPONSE:
+            elif ras_data_type == MessageType.GET_WORKING_SERVER_INFO_RESPONSE:
+                server = await read_server(packet)
+                packet_array.append(server)
+            elif ras_data_type in [MessageType.CREATE_INFOBASE_RESPONSE, MessageType.REG_WORKING_SERVER_RESPONSE]:
                 packet_array.append(read_uuid(packet))
             else:
                 ras_data_count = await unpack_varint_base128(packet)
@@ -591,6 +653,9 @@ async def read_packet(reader):
                                            MessageType.GET_AGENT_ADMINS_RESPONSE]:
                         user = await read_user(packet)
                         packet_array.append(user)
+                    elif ras_data_type == MessageType.GET_WORKING_SERVERS_RESPONSE:
+                        server = await read_server(packet)
+                        packet_array.append(server)
 
     return packet_type, packet_array
 
@@ -886,6 +951,58 @@ async def ras_command(ras_args):
                 except MessageException as e:
                     print("Can't terminate session", uuid.UUID(bytes=session_id), "-", e)
 
+    if ras_args.command == 'server':
+        cluster_id = uuid.UUID(ras_args.cluster).bytes
+        if ras_args.subcommand1 == 'list':
+            packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.GET_WORKING_SERVERS_REQUEST)
+            packet.append_raw(cluster_id)
+            send_packet(writer, packet)
+            packet_type, packet_array = await read_packet(reader)
+            assert packet_type == PacketType.ENDPOINT_MESSAGE
+            pp(packet_array)
+        elif ras_args.subcommand1 == 'info':
+            packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.GET_WORKING_SERVER_INFO_REQUEST)
+            packet.append_raw(cluster_id)
+            packet.append_raw(uuid.UUID(ras_args.server).bytes)
+            send_packet(writer, packet)
+            packet_type, packet_array = await read_packet(reader)
+            assert packet_type == PacketType.ENDPOINT_MESSAGE
+            pp(packet_array)
+        elif ras_args.subcommand1 == 'remove':
+            packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.UNREG_WORKING_SERVER_REQUEST)
+            packet.append_raw(cluster_id)
+            packet.append_raw(uuid.UUID(ras_args.server).bytes)
+            send_packet(writer, packet)
+            packet_type, packet_array = await read_packet(reader)
+            assert packet_type == PacketType.ENDPOINT_MESSAGE
+            pp(packet_array)
+        elif ras_args.subcommand1 == 'insert':
+            packet = Packet(PacketType.ENDPOINT_MESSAGE, MessageType.REG_WORKING_SERVER_REQUEST)
+            packet.append_raw(cluster_id)
+            server = {}
+            server['working_server_id'] = uuid.UUID(int=0)
+            server['host_name'] = ras_args.agent_host
+            server['main_port'] = ras_args.agent_port
+            server['name'] = ras_args.name
+            server['main_server'] = ras_args.using == 'main'
+            server['safe_working_processes_memory_limit'] = ras_args.safe_working_processes_memory_limit
+            server['safe_call_memory_limit'] = ras_args.safe_call_memory_limit
+            server['infobases_per_working_process_limit'] = ras_args.infobases_limit
+            server['working_process_memory_limit'] = ras_args.memory_limit
+            server['connections_per_working_process_limit'] = ras_args.connections_limit
+            server['cluster_main_port'] = ras_args.cluster_port
+            server['dedicated_managers'] = ras_args.dedicate_managers == 'all'
+            server['port_ranges'] = [(int(v.split(':')[0]), int(v.split(':')[1])) for v in ras_args.port_range]
+            # version >= 8
+            server['critical_processes_total_memory'] = ras_args.critical_total_memory
+            server['temporary_allowed_processes_total_memory'] = ras_args.temporary_allowed_total_memory
+            server['temporary_allowed_processes_total_memory_time_limit'] = ras_args.temporary_allowed_total_memory_time_limit
+            write_server(server, packet)
+            send_packet(writer, packet)
+            packet_type, packet_array = await read_packet(reader)
+            assert packet_type == PacketType.ENDPOINT_MESSAGE
+            pp(packet_array)
+
     packet = Packet(PacketType.ENDPOINT_CLOSE)
     packet.append(pack_varint_base64(endpoint_id))
     send_packet(writer, packet)
@@ -1127,6 +1244,72 @@ if __name__ == '__main__':
                                           help='идентификатор информационной базы')
     parser_session_terminate.add_argument('--error-message',
                                           help='сообщение о причине завершения сеанса')
+
+    parser_server = sub_parsers.add_parser('server', help='Режим администрирования рабочего сервера')
+    parser_server.add_argument('--cluster',
+                                 help='идентификатор кластера серверов', required=True)
+    parser_server.add_argument('--cluster-user',
+                                 help='имя администратора кластера', required=False)
+    parser_server.add_argument('--cluster-pwd',
+                                 help='пароль администратора кластера', required=False)
+    server_sub_parsers = parser_server.add_subparsers(help='Команды администрирования рабочих серверов',
+                                                          required=True, dest='subcommand1')
+    parser_server_list = server_sub_parsers.add_parser('list', help='получение списка информации о рабочих серверах')
+    parser_server_info = server_sub_parsers.add_parser('info', help='получение информации о рабочем сервере')
+    parser_server_info.add_argument('--server',
+                               help='идентификатор рабочего сервера кластера серверов', required=True)
+    parser_server_insert = server_sub_parsers.add_parser('insert', help='регистрация рабочего сервера')
+    parser_server_insert.add_argument('--agent-host',
+                                    help='имя хоста или IP-адрес агента сервера', required=True)
+    parser_server_insert.add_argument('--agent-port', type=int,
+                                      help='основной порт агента сервера', required=True)
+    parser_server_insert.add_argument('--port-range', default='11560:11591',
+                                      help="""диапазон IP портов для динамического распределения,
+                                      возможно указание нескольких диапазонов""", required=True, nargs="+")
+    parser_server_insert.add_argument('--name',
+                                      help='наименование рабочего сервера', required=False)
+    parser_server_insert.add_argument('--using', choices=['main', 'normal'], default='main',
+                                      help="""вариант использования рабочего сервера
+                main - в качестве центрального сервера
+                normal - в качестве обычного сервера""", required=False)
+    parser_server_insert.add_argument('--infobases-limit', type=int, default=8,
+                                      help='максимальное количество информационных баз на рабочий процесс',
+                                      required=False)
+    parser_server_insert.add_argument('--memory-limit', type=int, default=0,
+                                      help='предел использования памяти рабочими процессами',
+                                      required=False)
+    parser_server_insert.add_argument('--connections-limit', type=int, default=256,
+                                      help='максимальное количество соединения на рабочий процесс',
+                                      required=False)
+    parser_server_insert.add_argument('--cluster-port', type=int, default=1541,
+                                      help='номер порта главного менеджера кластера',
+                                      required=False)
+    parser_server_insert.add_argument('--dedicate-managers', choices=['all', 'none'], default='none',
+                                      help="""вариант размещения менеджеров сервисов
+                all - размещать все сервисы в отдельных менеджерах
+                none - размещать все сервисы в одном менеджере""",
+                                      required=False)
+    parser_server_insert.add_argument('--safe-working-processes-memory-limit', type=int, default=0,
+                                      help='максимальный объем памяти рабочих процессов на сервере',
+                                      required=False)
+    parser_server_insert.add_argument('--safe-call-memory-limit', type=int, default=0,
+                                      help='безопасный расход памяти за один вызов в байтах',
+                                      required=False)
+    parser_server_insert.add_argument('--critical-total-memory', type=int, default=0,
+                                      help='максимальный объем памяти процессов рабочего сервера',
+                                      required=False)
+    parser_server_insert.add_argument('--temporary-allowed-total-memory', type=int, default=0,
+                                      help='допустимый объем памяти процессов рабочего сервера',
+                                      required=False)
+    parser_server_insert.add_argument('--temporary-allowed-total-memory-time-limit', type=int, default=300,
+                                      help='предел превышения (секунд) допустимого объема памяти процессов',
+                                      required=False)
+    parser_server_insert.add_argument('--service-principal-name', default='',
+                                      help='имя службы (Service Principal Name, SPN) сервера 1С:Предприятия',
+                                      required=False)
+    parser_server_remove = server_sub_parsers.add_parser('remove', help='удаление рабочего сервера')
+    parser_server_remove.add_argument('--server',
+                                    help='идентификатор рабочего сервера кластера серверов', required=True)
 
     args = parser.parse_args()
     asyncio.run(ras_command(args))
